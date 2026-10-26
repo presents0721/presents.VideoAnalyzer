@@ -1,0 +1,10 @@
+{
+  "Version": "5.5.0",
+  "Dependencies": {
+    "Alife.Function.FunctionCaller": "",
+    "Alife.Function.AIModelUtility": "",
+    "Alife.Function.Vision": "",
+    "Alife.Function.Auditory": ""
+  },
+  "Environments": {}
+}

@@ -1,0 +1,352 @@
+@namespace presents.Video
+@using AntDesign
+@inherits Alife.Framework.ModuleUIBase<VideoService, VideoServiceConfig>
+
+<Form TModel="VideoServiceConfig" Model="@Configuration" Layout="@FormLayout.Vertical">
+    <FormItem>
+        <Text Type="TextElementType.Secondary">
+            ffmpeg 流式抽帧 + 视觉模型按段落连续理解 + 音轨流式转写，全程不把视频读进内存。
+            不再是「一张张独立截图」：段内帧按时间顺序分析，每帧带着前几帧的内容和同一时刻的台词，所以能看出动作的先后、镜头的切换和台词的对应关系。
+            看视频需要启用任一视觉模型模块（Qwen3-VL / MiniCPM-V / OpenAI 视觉）；听视频优先用本机 SenseVoice，没装本机模型时自动走在线直连。
+        </Text>
+    </FormItem>
+
+    <FormItem Label="视觉模型">
+        <Select TItemValue="string" TItem="string" @bind-Value="@Configuration.SelectedVisionModel" Style="width: 100%;" Placeholder="自动（启用中的模型）" AllowClear>
+            @if (Module != null)
+            {
+                @foreach (var m in Module.AvailableVisionModels)
+                {
+                    <SelectOption TItemValue="string" TItem="string" Value="@m"><ChildContent Context="modelName">@modelName</ChildContent></SelectOption>
+                }
+            }
+        </Select>
+        <Text Type="TextElementType.Secondary" Style="font-size: 12px;">
+            留空则使用当前启用中的视觉模型；同时启用多个视觉模型模块时，可在这里指定用哪一个。改完重启本插件生效。
+        </Text>
+    </FormItem>
+
+    <FormItem Label="内容类型">
+        <RadioGroup @bind-Value="@Configuration.ContentType">
+            <Radio Value="@VideoContentType.General">通用（影视/vlog/剧情）</Radio>
+            <Radio Value="@VideoContentType.InfoDense">信息密集（技术分享、论文讲解、AI 日报）</Radio>
+        </RadioGroup>
+        <Text Type="TextElementType.Secondary" Style="font-size: 12px;">
+            信息密集：关键帧最多留 36 个、总览切 3 张、单帧描述上限提到 2048 字，并让抽帧尽量落在讲师开口的时刻。
+            注意本地视觉模型会把画面压到约 818×460，代码级小字仍读不出；在线高分辨率模型才吃得下密集文字。
+        </Text>
+    </FormItem>
+
+    @* ═══ 预设档位 ═══ *@
+    <Title Level="4">① 先选一个画质档位</Title>
+    <Text Type="TextElementType.Secondary" Style="font-size: 12px;">
+        点一下就套用，套用后下面每一项仍然可以单独改。@CurrentPresetText
+    </Text>
+    <div style="display: flex; flex-direction: column; gap: 8px; margin: 8px 0 4px 0;">
+        @foreach (VideoQualityPreset preset in Presets)
+        {
+            <div style="display: flex; align-items: center; gap: 12px;">
+                <Button Size="@ButtonSize.Small"
+                        Type="@(IsMatched(preset) ? ButtonType.Primary : ButtonType.Default)"
+                        OnClick="@(() => ApplyPreset(preset))"
+                        Style="min-width: 110px;">
+                    @VideoQualityPresets.GetName(preset)
+                </Button>
+                <Text Type="TextElementType.Secondary" Style="font-size: 12px;">
+                    @VideoQualityPresets.GetDescription(preset)
+                </Text>
+            </div>
+        }
+    </div>
+
+    @* ═══ 内容场景 ═══ *@
+    <Title Level="4">② 按内容场景一键套用</Title>
+    <Text Type="TextElementType.Secondary" Style="font-size: 12px;">
+        日常轻松 / 通用均衡 / 技术分享 / 论文讲解 / AI 日报：每一条都同时设定采样密度、清晰度、概览与提示词，套用后仍可逐项改。@CurrentContentText
+    </Text>
+    <div style="display: flex; flex-direction: column; gap: 8px; margin: 8px 0 4px 0;">
+        @foreach (VideoContentPreset preset in ContentPresets)
+        {
+            <div style="display: flex; align-items: center; gap: 12px;">
+                <Button Size="@ButtonSize.Small"
+                        Type="@(IsContentMatched(preset) ? ButtonType.Primary : ButtonType.Default)"
+                        OnClick="@(() => ApplyContentPreset(preset))"
+                        Style="min-width: 110px;">
+                    @VideoContentPresets.GetName(preset)
+                </Button>
+                <Text Type="TextElementType.Secondary" Style="font-size: 12px;">
+                    @VideoContentPresets.GetDescription(preset)
+                </Text>
+            </div>
+        }
+    </div>
+
+    @* ═══ 显存适配 ═══ *@
+    <Title Level="4">③ 按显存取推荐值</Title>
+    <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+        <span>我的显存</span>
+        <InputNumber TValue="int" @bind-Value="@vramGb" Min="1" Max="64" Style="width: 90px;"/>
+        <span>GB</span>
+        <Button Size="@ButtonSize.Small" Type="@ButtonType.Primary" OnClick="@ApplyRecommended">
+            套用「@VideoQualityPresets.GetName(VideoQualityPresets.RecommendForVram(vramGb))」
+        </Button>
+    </div>
+    <Alert Type="@AlertType.Info" ShowIcon="true" Message="@VideoQualityPresets.GetVramAdvice(vramGb)" Style="margin-top: 8px;"/>
+    <Alert Type="@AlertType.Success" ShowIcon="false" Message="@EstimateText" Style="margin-top: 8px;"/>
+
+    @if (Module != null)
+    {
+        <FormItem Label="运行状态">
+            <Text>@(Module.IsAnalysing ? Module.ProgressText : "空闲")</Text>
+            @if (string.IsNullOrEmpty(Module.LastReportPath) == false)
+            {
+                <div style="font-size: 12px; color: rgba(0,0,0,0.45);">最近报告：@Module.LastReportPath</div>
+            }
+        </FormItem>
+    }
+
+    @* ═══ 画质与覆盖 ═══ *@
+    <Title Level="4">④ 画质与覆盖（逐项微调）</Title>
+    <FormItem Label="每秒抽帧数（0=改用下方「抽帧数量」）">
+        <InputNumber TValue="double" @bind-Value="@Configuration.SampleFps" Min="0" Max="10" Step="0.1" Style="width: 100%;"/>
+        <Text Type="TextElementType.Secondary" Style="font-size: 12px;">
+            推荐用这个：总帧数 = 视频秒数 × 该值，密度恒定，片子再长也不用重新算。
+            常规 1；动作密集（FPS 游戏剪辑）2；长片省流 0.5（每 2 秒）或 0.1（每 10 秒，2 小时电影约 720 帧）。总帧数上限 3000。
+        </Text>
+    </FormItem>
+    <FormItem Label="抽帧数量（1~120，仅当上方填 0 时生效）">
+        <InputNumber TValue="int" @bind-Value="@Configuration.FrameCount" Min="1" Max="120" Disabled="@(Configuration.SampleFps > 0)" Style="width: 100%;"/>
+        <Text Type="TextElementType.Secondary" Style="font-size: 12px;">
+            开销第一大头。沿时间轴均匀取锚点，覆盖全片不漏段落；画面真正变化处还会额外并入关键帧。
+            只求大意 12~24；普通片子 48~60；要还原过程 90~120。
+            注意这是「均匀锚点有多少个」，片一长密度会自动变稀，长片建议改用上方的每秒抽帧数。
+        </Text>
+    </FormItem>
+    <FormItem Label="抽帧最大宽度（0~3840，0=原始）">
+        <InputNumber TValue="int" @bind-Value="@Configuration.FrameMaxWidth" Min="0" Max="3840" Style="width: 100%;"/>
+        <Text Type="TextElementType.Secondary" Style="font-size: 12px;">
+            本地 Qwen/MiniCPM 后端下，宽度从 768 到 3840，单帧视觉 token 只从约 105 涨到约 128（处理器先把画面压到 40 万像素内）。
+            想省 token 别在这里省，去减帧数和输出 token；接在线视觉模型按尺寸计费时才需要下调。
+        </Text>
+    </FormItem>
+    <FormItem Label="单帧描述字符上限（32~4096）">
+        <InputNumber TValue="int" @bind-Value="@Configuration.FrameMaxChars" Min="32" Max="4096" Style="width: 100%;"/>
+        <Text Type="TextElementType.Secondary" Style="font-size: 12px;">超过就截断，防止某帧啰嗦占满上下文。省流 256~512，常规 1024。</Text>
+    </FormItem>
+
+    @* ═══ 性能与并发 ═══ *@
+    <Title Level="4">⑤ 性能与并发</Title>
+    <FormItem Label="视觉分析并发（1~120）">
+        <InputNumber TValue="int" @bind-Value="@Configuration.VisionConcurrency" Min="1" Max="120" Style="width: 100%;"/>
+        <Text Type="TextElementType.Secondary" Style="font-size: 12px;">
+            本地 Qwen/MiniCPM 是单进程串行，这里只是排队长度，8~16 就够；接在线视觉模型时拉到 32~120 才会真正并行提速。
+        </Text>
+    </FormItem>
+    <FormItem Label="抽帧并发（1~16）">
+        <InputNumber TValue="int" @bind-Value="@Configuration.FrameExtractConcurrency" Min="1" Max="16" Style="width: 100%;"/>
+        <Text Type="TextElementType.Secondary" Style="font-size: 12px;">同时跑几个 ffmpeg。SSD 12~16，机械硬盘 4~8，太高反而互相抢。</Text>
+    </FormItem>
+    <FormItem Label="单帧分析超时，秒（5~300）">
+        <InputNumber TValue="int" @bind-Value="@Configuration.FrameTimeoutSeconds" Min="5" Max="300" Style="width: 100%;"/>
+        <Text Type="TextElementType.Secondary" Style="font-size: 12px;">超时算失败并自动重试。本地小模型 120~200；在线或大帧 300。</Text>
+    </FormItem>
+
+    @* ═══ 容错 ═══ *@
+    <Title Level="4">⑥ 容错</Title>
+    <FormItem Label="失败重试次数（0~5）">
+        <InputNumber TValue="int" @bind-Value="@Configuration.MaxRetryCount" Min="0" Max="5" Style="width: 100%;"/>
+        <Text Type="TextElementType.Secondary" Style="font-size: 12px;">帧已抽好，重试不会重复抽帧。本地很稳 2~3 次；在线偶发限流建议 5 次。</Text>
+    </FormItem>
+    <FormItem Label="重试等待，毫秒（0~60000）">
+        <InputNumber TValue="int" @bind-Value="@Configuration.RetryDelayMs" Min="0" Max="60000" Style="width: 100%;"/>
+        <Text Type="TextElementType.Secondary" Style="font-size: 12px;">第 n 次重试等待 该值×n 毫秒，递增退避。本地 1000，在线 2000。</Text>
+    </FormItem>
+
+    @* ═══ 分析质量 ═══ *@
+    <Title Level="4">⑦ 分析质量</Title>
+    <FormItem Label="单帧最大输出 token（64~8192）">
+        <InputNumber TValue="int" @bind-Value="@Configuration.MaxOutputTokens" Min="64" Max="8192" Style="width: 100%;"/>
+        <Text Type="TextElementType.Secondary" Style="font-size: 12px;">
+            开销第二大头：帧数 × 这个值。省流 256~512；常规 1024；细节控 2048~4096；8192 只在极致档用。
+        </Text>
+    </FormItem>
+    <FormItem Label="思考强度">
+        <RadioGroup @bind-Value="@Configuration.AnalysisDepth">
+            <Radio Value="@VideoAnalysisDepth.Brief">简洁（一句话，最快最省）</Radio>
+            <Radio Value="@VideoAnalysisDepth.Standard">标准（场景+主体+动作+文字，推荐）</Radio>
+            <Radio Value="@VideoAnalysisDepth.Deep">深度（穷举细节，慢且费）</Radio>
+        </RadioGroup>
+    </FormItem>
+    <FormItem Label="单帧提示词">
+        <TextArea AutoSize="true" MinRows="3" @bind-Value="@Configuration.FramePrompt"/>
+        <Text Type="TextElementType.Secondary" Style="font-size: 12px;">一般不改。想让它专门盯字幕、人名、比分之类，可以在这里改写。</Text>
+    </FormItem>
+
+    @* ═══ 上下文与连贯性 ═══ *@
+    <Title Level="4">⑧ 上下文与连贯性（决定懂不懂剧情）</Title>
+    <Text Type="TextElementType.Secondary" Style="font-size: 12px;">
+        关掉下面的开关，每帧就是一张互不相干的截图；开着，模型才知道「相对上一帧发生了什么」，台词也能和画面对上。
+    </Text>
+    <FormItem Label="上下文连贯">
+        <Switch Checked="@Configuration.ContextEnabled" CheckedChanged="@(v => { Configuration.ContextEnabled = v; })"/>
+        <Text Type="TextElementType.Secondary" Style="font-size: 12px;">
+            开着：每帧带前几帧看到的内容 + 同刻台词，并要求先判断「变化 / 延续」再描述，避免复述同一画面。默认开。
+        </Text>
+    </FormItem>
+    <FormItem Label="每段帧数（1~30）">
+        <InputNumber TValue="int" @bind-Value="@Configuration.SegmentSize" Min="1" Max="30" Style="width: 100%;"/>
+        <Text Type="TextElementType.Secondary" Style="font-size: 12px;">
+            时间轴切成若干段，段内帧按时间顺序连续分析（才有前后文），段与段之间仍并行。默认 6；想更连贯 10~12（更慢）；想更快 3~4。
+        </Text>
+    </FormItem>
+    <FormItem Label="前情帧数（0~6）">
+        <InputNumber TValue="int" @bind-Value="@Configuration.ContextLookback" Min="0" Max="6" Style="width: 100%;"/>
+        <Text Type="TextElementType.Secondary" Style="font-size: 12px;">
+            每帧带上前几帧的描述当上下文。默认 2（足够看出动作的连续过程）；1=只看上一帧；0=不带前情。
+        </Text>
+    </FormItem>
+    <FormItem Label="语音上下文窗口，秒（0~60）">
+        <InputNumber TValue="int" @bind-Value="@Configuration.AudioContextSeconds" Min="0" Max="60" Style="width: 100%;"/>
+        <Text Type="TextElementType.Secondary" Style="font-size: 12px;">
+            每帧把这一时刻前后各 N 秒的语音/字幕塞进提示词，让画面和台词对得上。默认 10；访谈/解说可填 15~20；0=不喂语音。
+        </Text>
+    </FormItem>
+
+    @* ═══ 全片概览与音轨可信度 ═══ *@
+    <Title Level="4">⑨ 全片概览与音轨可信度</Title>
+    <Text Type="TextElementType.Secondary" Style="font-size: 12px;">
+        先让模型一眼看完整个视频的走向，再用量测确认「这条音轨到底有没有人声」——两者都是为了不让模型凭局部画面和凭空台词下结论。
+    </Text>
+    <FormItem Label="全片概览图">
+        <Switch Checked="@Configuration.OverviewEnabled" CheckedChanged="@(v => { Configuration.OverviewEnabled = v; })"/>
+        <Text Type="TextElementType.Secondary" Style="font-size: 12px;">
+            先按画面变化挑出关键帧（静止的 PPT 页不会重复占格），再拼成网格图一次识图得到全片主题、段落和镜头切换点，作为逐帧分析的骨架。默认开。
+        </Text>
+    </FormItem>
+    <FormItem Label="概览格数（4~24）">
+        <InputNumber TValue="int" @bind-Value="@Configuration.OverviewCells" Min="4" Max="24" Style="width: 100%;"/>
+        <Text Type="TextElementType.Secondary" Style="font-size: 12px;">
+            默认 8（3×3，每格最大）；短视频 4~6；长片想看清结构可到 12~16，但会变成 4 列、每格被压小。格越少每格越大。
+        </Text>
+    </FormItem>
+    <FormItem Label="概览每格宽度，px（256~800）">
+        <InputNumber TValue="int" @bind-Value="@Configuration.OverviewCellWidth" Min="256" Max="800" Style="width: 100%;"/>
+        <Text Type="TextElementType.Secondary" Style="font-size: 12px;">
+            默认 640。视觉模型认图弱就调到 720~800（小字、字幕才读得出来，但部分模型会自行缩图，收益有上限）；只想看大结构可降到 384。整张图总宽会压在 2400px 以内。
+        </Text>
+    </FormItem>
+    <FormItem Label="概览最多几张图（1~4）">
+        <InputNumber TValue="int" @bind-Value="@Configuration.OverviewMaxSheets" Min="1" Max="4" Style="width: 100%;"/>
+        <Text Type="TextElementType.Secondary" Style="font-size: 12px;">
+            关键帧太多时总览图最多切成几张，默认 2（最多约 18 格）。每张都要一次识图：长片切换多可到 3~4，想省调用就填 1。
+        </Text>
+    </FormItem>
+    <FormItem Label="概览最多保留几个关键帧（4~36）">
+        <InputNumber TValue="int" @bind-Value="@Configuration.OverviewMaxKeyframes" Min="4" Max="36" Style="width: 100%;"/>
+        <Text Type="TextElementType.Secondary" Style="font-size: 12px;">
+            按画面变化挑帧时最多留几个，默认 18（约 2 张 3×3）。太少会漏掉后半段内容；想覆盖更全可到 36。
+        </Text>
+    </FormItem>
+    <FormItem Label="画面变化阈值（0 = 自动）">
+        <InputNumber TValue="double" @bind-Value="@Configuration.SceneThreshold" Min="0" Max="0.9" Step="0.01" Style="width: 100%;"/>
+        <Text Type="TextElementType.Secondary" Style="font-size: 12px;">
+            整片逐帧比差异时，超过多少才算「画面真的变了」。默认 0 = 自动（差异中位数 × 4，夹在 0.008~0.08）；想更敏感填 0.01~0.02，更严格填 0.05~0.08。调太高会把淡入淡出抽成空白中间帧。
+        </Text>
+    </FormItem>
+    <FormItem Label="声学侦察">
+        <Switch Checked="@Configuration.AcousticCheck" CheckedChanged="@(v => { Configuration.AcousticCheck = v; })"/>
+        <Text Type="TextElementType.Secondary" Style="font-size: 12px;">
+            转写前先用 ffmpeg 量音量：静音/纯底噪音轨直接跳过转写（否则 ASR 会编出整段假台词），并过滤「请不吝点赞订阅」「字幕由…提供」这类幻觉模板句。默认开。
+        </Text>
+    </FormItem>
+
+    @* ═══ 音频转写 ═══ *@
+    <Title Level="4">⑩ 音频转写</Title>
+    <FormItem Label="音频分块采样数（16000~640000）">
+        <InputNumber TValue="int" @bind-Value="@Configuration.AudioChunkSamples" Min="16000" Max="640000" Style="width: 100%;"/>
+        <Text Type="TextElementType.Secondary" Style="font-size: 12px;">
+            本机 SenseVoice 直接顶满 640000（40 秒/块），只多占 2.5MB 内存，不涨显存。在线转写时调小出结果更快，调大请求更少更省。
+        </Text>
+    </FormItem>
+    <FormItem Label="上传转码码率，kbps（0~256，0=直接传 wav）">
+        <InputNumber TValue="int" @bind-Value="@Configuration.UploadBitrateKbps" Min="0" Max="256" Style="width: 100%;"/>
+        <Text Type="TextElementType.Secondary" Style="font-size: 12px;">
+            只在本机没装语音模型、走在线直连时生效。普通话清晰 64~96；嘈杂/唱歌/多人 128~192；要最准 256（流量翻倍）。
+        </Text>
+    </FormItem>
+    <FormItem Label="在线转写端点（本机无模型时的兜底）">
+        <Input @bind-Value="@Configuration.OnlineTranscribeEndpoint" Placeholder="https://xxx/v1/audio/transcriptions"/>
+    </FormItem>
+    <FormItem Label="在线转写模型">
+        <Input @bind-Value="@Configuration.OnlineTranscribeModel"/>
+    </FormItem>
+    <FormItem Label="在线转写密钥">
+        <Input @bind-Value="@Configuration.OnlineTranscribeApiKey" Placeholder="留空表示不启用在线兜底"/>
+    </FormItem>
+
+    @* ═══ 其它 ═══ *@
+    <Title Level="4">⑪ 其它</Title>
+    <FormItem Label="ffmpeg 路径">
+        <Input @bind-Value="@Configuration.FfmpegPath" Placeholder="留空自动查找"/>
+        <Text Type="TextElementType.Secondary" Style="font-size: 12px;">留空会自动找系统 PATH / python imageio-ffmpeg / 常见安装目录，一般不用管。</Text>
+    </FormItem>
+    <FormItem Label="保存完整报告">
+        <Switch Checked="@Configuration.SaveReport" CheckedChanged="@(v => { Configuration.SaveReport = v; })"/>
+        <Text Type="TextElementType.Secondary" Style="font-size: 12px;">长视频务必开启：AI 只看精简版，需要时再让它按路径读完整版，省上下文。</Text>
+    </FormItem>
+    <FormItem Label="推送字符上限（1000~200000）">
+        <InputNumber TValue="int" @bind-Value="@Configuration.PokeCharLimit" Min="1000" Max="200000" Style="width: 100%;"/>
+        <Text Type="TextElementType.Secondary" Style="font-size: 12px;">超过就只推精简版 + 完整报告路径。6000~8000 最省，20000 以上才让 AI 一次看全。</Text>
+    </FormItem>
+</Form>
+
+@code {
+    static readonly VideoQualityPreset[] Presets = [
+        VideoQualityPreset.Economy,
+        VideoQualityPreset.Light,
+        VideoQualityPreset.Balanced,
+        VideoQualityPreset.High,
+        VideoQualityPreset.Extreme
+    ];
+
+    static readonly VideoContentPreset[] ContentPresets = [
+        VideoContentPreset.Daily,
+        VideoContentPreset.General,
+        VideoContentPreset.TechShare,
+        VideoContentPreset.Paper,
+        VideoContentPreset.AiNews
+    ];
+
+    int vramGb = 8;
+
+    string CurrentPresetText => VideoQualityPresets.Match(Configuration) is { } preset
+        ? $"当前设置 =「{VideoQualityPresets.GetName(preset)}」档"
+        : "当前设置 = 自定义（在预设基础上手动改过）";
+
+    string CurrentContentText => VideoContentPresets.Match(Configuration) is { } preset
+        ? $"当前 =「{VideoContentPresets.GetName(preset)}」"
+        : "当前 = 自定义";
+
+    string EstimateText => "本档位估算：" + VideoTokenEstimator.Describe(Configuration);
+
+    bool IsMatched(VideoQualityPreset preset) => VideoQualityPresets.Match(Configuration) == preset;
+
+    bool IsContentMatched(VideoContentPreset preset) => VideoContentPresets.Match(Configuration) == preset;
+
+    void ApplyContentPreset(VideoContentPreset preset)
+    {
+        VideoContentPresets.Apply(preset, Configuration);
+        StateHasChanged();
+    }
+
+    void ApplyPreset(VideoQualityPreset preset)
+    {
+        VideoQualityPresets.Apply(preset, Configuration);
+        StateHasChanged();
+    }
+
+    void ApplyRecommended()
+    {
+        ApplyPreset(VideoQualityPresets.RecommendForVram(vramGb));
+    }
+}
