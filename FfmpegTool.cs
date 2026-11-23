@@ -428,7 +428,7 @@ public static class FfmpegTool
                 return hit;
         }
 
-        //各盘根目录下的 ffmpeg* 解压目录（如 E:\ffmpeg-9.0.2-essentials_build\bin\ffmpeg.exe）
+        //各盘根目录下的 ffmpeg* 解压目录（如 <drive>\\ffmpeg-*\\bin\\ffmpeg.exe）
         foreach (DriveInfo drive in DriveInfo.GetDrives())
         {
             if (drive.DriveType is not (DriveType.Fixed or DriveType.Removable or DriveType.Network))
